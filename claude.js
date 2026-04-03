@@ -36,4 +36,6 @@ export async function askClaude(history, mode = 'villa') {
     .trim()
 
   return { text: cleanText, triggers }
+  
 }
+
