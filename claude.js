@@ -1,16 +1,18 @@
-// src/claude.js
+// claude.js
 // Llama a la API de Anthropic y detecta triggers en la respuesta
 
 import Anthropic from '@anthropic-ai/sdk'
 import { PROMPTS } from './prompts.js'
+
+console.log('API KEY:', process.env.ANTHROPIC_API_KEY ? 'CARGADA ✅' : 'VACÍA ❌')
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 /**
  * Envía el historial a Claude y devuelve la respuesta + triggers detectados
  */
-export async function askClaude(history, mode = 'meta') {
-  const systemPrompt = PROMPTS[mode] || PROMPTS.meta
+export async function askClaude(history, mode = 'villa') {
+  const systemPrompt = PROMPTS[mode] || PROMPTS.villa
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -21,14 +23,12 @@ export async function askClaude(history, mode = 'meta') {
 
   const rawText = response.content[0].text
 
-  // Detectar triggers embebidos en la respuesta
   const triggers = {
     handoff:   rawText.includes('[HANDOFF_TRIGGER]'),
     qualified: rawText.includes('[LEAD_QUALIFIED]'),
     followup:  rawText.includes('[FOLLOWUP_TRIGGER]')
   }
 
-  // Limpiar el texto antes de enviarlo al usuario
   const cleanText = rawText
     .replace(/\[HANDOFF_TRIGGER\]/g, '')
     .replace(/\[LEAD_QUALIFIED\]/g, '')
