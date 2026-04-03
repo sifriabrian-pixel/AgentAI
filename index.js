@@ -1,40 +1,124 @@
-// src/index.js
-// Punto de entrada — conecta WhatsApp con el agente IA
+// index.js
+// Punto de entrada — conecta WhatsApp con el agente IA + servidor QR web
 
 import 'dotenv/config'
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import pino from 'pino'
 import qrcode from 'qrcode-terminal'
+import QRCode from 'qrcode'
 import cron from 'node-cron'
+import http from 'http'
 
 import { askClaude } from './claude.js'
 import { getHistory, addToHistory, getLeadState, updateLeadState, getLeadsPendingFollowup } from './memory.js'
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
-const ASESOR_JID    = `${process.env.ASESOR_WHATSAPP}@s.whatsapp.net`
-const AGENTE_MODO   = process.env.AGENTE_MODO || 'meta'
+const ASESOR_JID     = `${process.env.ASESOR_WHATSAPP}@s.whatsapp.net`
+const AGENTE_MODO    = process.env.AGENTE_MODO || 'villa'
 const CLIENTE_NOMBRE = process.env.CLIENTE_NOMBRE || 'Cliente'
-const SESSION_PATH  = process.env.SESSION_PATH || './sessions'
+const SESSION_PATH   = process.env.SESSION_PATH || './sessions'
+const PORT           = process.env.PORT || 3000
 
-// Logger silencioso para Baileys (evita spam en consola)
+// Logger silencioso para Baileys
 const baileysLogger = pino({ level: 'silent' })
 
-// Logger de la app (visible y legible)
+// Logger de la app
 const logger = pino(pino.transport({
   target: 'pino-pretty',
   options: { colorize: true, translateTime: 'HH:MM:ss', ignore: 'pid,hostname' }
 }))
 
+// ─── ESTADO GLOBAL DEL QR ─────────────────────────────────────────────────
+let currentQR = null
+let isConnected = false
+
+// ─── SERVIDOR WEB PARA QR ─────────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  if (req.url === '/qr') {
+    if (isConnected) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8">
+        <title>Agente WhatsApp</title>
+        <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#128C7E;}
+        .box{background:white;padding:40px;border-radius:16px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.2);}
+        h2{color:#075E54;margin-bottom:8px;}p{color:#555;}</style></head>
+        <body><div class="box">
+        <h2>✅ WhatsApp Conectado</h2>
+        <p>El agente de <strong>${CLIENTE_NOMBRE}</strong> está activo y funcionando.</p>
+        <p style="color:#25D366;font-size:24px;margin-top:16px;">🤖 En línea 24/7</p>
+        </div></body></html>`)
+      return
+    }
+
+    if (!currentQR) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta http-equiv="refresh" content="3">
+        <title>Esperando QR...</title>
+        <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#128C7E;}
+        .box{background:white;padding:40px;border-radius:16px;text-align:center;}
+        h2{color:#075E54;}</style></head>
+        <body><div class="box">
+        <h2>⏳ Generando QR...</h2>
+        <p>La página se actualizará automáticamente en 3 segundos.</p>
+        </div></body></html>`)
+      return
+    }
+
+    try {
+      const qrImage = await QRCode.toDataURL(currentQR, { width: 300, margin: 2 })
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta http-equiv="refresh" content="30">
+        <title>Escanear QR — ${CLIENTE_NOMBRE}</title>
+        <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#128C7E;}
+        .box{background:white;padding:40px;border-radius:16px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.2);}
+        h2{color:#075E54;margin-bottom:4px;}p{color:#555;font-size:14px;}
+        img{border:4px solid #075E54;border-radius:8px;margin:16px 0;}
+        .steps{text-align:left;background:#f5f5f5;padding:16px;border-radius:8px;margin-top:12px;font-size:13px;line-height:1.8;}
+        </style></head>
+        <body><div class="box">
+        <h2>📱 Vincular WhatsApp</h2>
+        <p>Agente: <strong>${CLIENTE_NOMBRE}</strong> — El QR expira en 60 segundos</p>
+        <img src="${qrImage}" alt="QR Code" width="280"/>
+        <div class="steps">
+          <strong>Pasos:</strong><br>
+          1. Abrí WhatsApp en el teléfono<br>
+          2. Tocá los 3 puntitos ⋮ → Dispositivos vinculados<br>
+          3. Tocá "Vincular dispositivo"<br>
+          4. Escaneá este QR
+        </div>
+        </div></body></html>`)
+    } catch (e) {
+      res.writeHead(500)
+      res.end('Error generando QR')
+    }
+    return
+  }
+
+  // Ruta raíz — redirigir al QR
+  res.writeHead(302, { Location: '/qr' })
+  res.end()
+})
+
+server.listen(PORT, () => {
+  logger.info(`🌐 Servidor QR activo en puerto ${PORT} — abrí /qr para escanear`)
+})
+
 // ─── MENSAJES DE SEGUIMIENTO ───────────────────────────────────────────────
 const FOLLOWUP_MSGS = {
+  villa: {
+    '24h': '¡Hola! 👋 Te escribo porque ayer te compartí información sobre una propiedad de Villa Bienes Raíces y quería saber si tuviste oportunidad de revisarla. ¿Sigue siendo de tu interés o prefieres que te muestre otras opciones? Estoy aquí para ayudarte 🏠',
+    '48h': '¡Hola de nuevo! 😊 Sé que andas ocupado/a, pero quería dejarte saber que seguimos disponibles para ayudarte a encontrar la propiedad ideal. ¿Podemos retomar cuando tengas un momento?'
+  },
   meta: {
-    '24h': '¡Hola! 👋 Te escribo porque ayer te compartí info de uno de nuestros proyectos y quería saber si tuviste oportunidad de revisarla. ¿Sigue siendo de tu interés o preferís que te cuente otras opciones? Estoy aquí para ayudarte 🏗️',
-    '48h': '¡Hola de nuevo! 😊 Sé que andás ocupado/a, pero quería dejarte saber que seguimos disponibles para ayudarte a encontrar el proyecto ideal. ¿Podemos retomar cuando tengas un momento?'
+    '24h': '¡Hola! 👋 Te escribo porque ayer te compartí info de uno de nuestros proyectos y quería saber si tuviste oportunidad de revisarla. ¿Sigue siendo de tu interés? Estoy aquí para ayudarte 🏗️',
+    '48h': '¡Hola de nuevo! 😊 Seguimos disponibles para ayudarte a encontrar el proyecto ideal. ¿Podemos retomar cuando tengas un momento?'
   },
   tuguru: {
-    '24h': '¡Hola! 👋 Te escribo porque ayer te compartí info de una propiedad y quería saber si tuviste oportunidad de revisarla. ¿Sigue siendo de tu interés o prefieres que te muestre otras opciones? Estoy aquí para ayudarte 🏠',
-    '48h': '¡Hola de nuevo! 😊 Sé que andas ocupado/a, pero quería dejarte saber que seguimos disponibles para ayudarte a encontrar la propiedad ideal. ¿Podemos retomar cuando tengas un momento?'
+    '24h': '¡Hola! 👋 Te escribo porque ayer te compartí info de una propiedad y quería saber si tuviste oportunidad de revisarla. ¿Sigue siendo de tu interés? Estoy aquí para ayudarte 🏠',
+    '48h': '¡Hola de nuevo! 😊 Seguimos disponibles para ayudarte a encontrar la propiedad ideal. ¿Podemos retomar cuando tengas un momento?'
   }
 }
 
@@ -46,7 +130,6 @@ async function notifyAsesor(sock, userId, responseText) {
       `📱 WhatsApp del prospecto: ${userId.replace('@s.whatsapp.net', '')}\n\n` +
       `💬 *Último mensaje del agente:*\n${responseText}\n\n` +
       `✅ *Acción sugerida:* Contactar al prospecto para confirmar la visita/reunión.`
-
     await sock.sendMessage(ASESOR_JID, { text: msg })
     logger.info(`✅ Asesor notificado sobre lead: ${userId}`)
   } catch (err) {
@@ -57,13 +140,10 @@ async function notifyAsesor(sock, userId, responseText) {
 // ─── HANDLER PRINCIPAL DE MENSAJES ────────────────────────────────────────
 async function handleMessage(sock, msg) {
   const jid = msg.key.remoteJid
-
-  // Ignorar mensajes propios, de grupos y de estado
   if (msg.key.fromMe) return
   if (jid.endsWith('@g.us')) return
   if (jid === 'status@broadcast') return
 
-  // Extraer texto del mensaje
   const text =
     msg.message?.conversation ||
     msg.message?.extendedTextMessage?.text ||
@@ -73,24 +153,14 @@ async function handleMessage(sock, msg) {
   if (!text) return
 
   logger.info(`📩 [${jid}] "${text}"`)
-
-  // Marcar como leído
   await sock.readMessages([msg.key])
-
-  // Indicador "escribiendo..."
   await sock.sendPresenceUpdate('composing', jid)
 
   try {
-    // Agregar mensaje del usuario al historial
     addToHistory(jid, 'user', text)
-
-    // Llamar a Claude
     const { text: reply, triggers } = await askClaude(getHistory(jid), AGENTE_MODO)
-
-    // Guardar respuesta en historial
     addToHistory(jid, 'assistant', reply)
 
-    // Actualizar estado del lead
     const state = getLeadState(jid)
     updateLeadState(jid, { lastMessageAt: Date.now() })
 
@@ -104,11 +174,9 @@ async function handleMessage(sock, msg) {
       logger.info(`⏰ Seguimiento programado para: ${jid}`)
     }
 
-    // Enviar respuesta al usuario
     await sock.sendPresenceUpdate('paused', jid)
     await sock.sendMessage(jid, { text: reply })
 
-    // Si hay handoff → notificar al asesor
     if (triggers.handoff && !state.handoffDone) {
       updateLeadState(jid, { handoffDone: true })
       logger.info(`🔔 Handoff activado — notificando asesor`)
@@ -118,40 +186,31 @@ async function handleMessage(sock, msg) {
   } catch (err) {
     logger.error({ err }, '❌ Error procesando mensaje')
     await sock.sendPresenceUpdate('paused', jid)
-
-    const errMsg = AGENTE_MODO === 'meta'
-      ? 'Perdoná, tuve un problema técnico. ¡Intentá de nuevo en un momento! 🙏'
-      : 'Disculpa, tuve un problema técnico. ¡Intenta de nuevo en un momento! 🙏'
-
+    const errMsg = '¡Disculpa! Tuve un problema técnico. Intenta de nuevo en un momento 🙏'
     await sock.sendMessage(jid, { text: errMsg })
   }
 }
 
 // ─── SCHEDULER DE SEGUIMIENTOS ─────────────────────────────────────────────
 function startFollowupScheduler(sock) {
-  // Revisar cada hora si hay leads pendientes de seguimiento
   cron.schedule('0 * * * *', async () => {
     const pending = getLeadsPendingFollowup()
     if (pending.length === 0) return
-
     logger.info(`⏰ Procesando ${pending.length} seguimiento(s) pendiente(s)`)
-
     for (const { userId, type } of pending) {
       try {
-        const msg = FOLLOWUP_MSGS[AGENTE_MODO][type]
+        const msgs = FOLLOWUP_MSGS[AGENTE_MODO] || FOLLOWUP_MSGS.villa
+        const msg = msgs[type]
         await sock.sendMessage(userId, { text: msg })
         addToHistory(userId, 'assistant', msg)
-
         if (type === '24h') updateLeadState(userId, { followup24Sent: true })
         if (type === '48h') updateLeadState(userId, { followup48Sent: true })
-
         logger.info(`📤 Seguimiento ${type} enviado a ${userId}`)
       } catch (err) {
         logger.error({ err }, `❌ Error enviando seguimiento a ${userId}`)
       }
     }
   })
-
   logger.info('⏰ Scheduler de seguimientos activo (revisión cada hora)')
 }
 
@@ -161,54 +220,51 @@ async function connectWhatsApp() {
   const { version } = await fetchLatestBaileysVersion()
 
   logger.info(`🚀 Iniciando agente: ${CLIENTE_NOMBRE} (modo: ${AGENTE_MODO})`)
-  logger.info(`📌 Versión de WhatsApp Web: ${version.join('.')}`)
 
   const sock = makeWASocket({
     version,
     logger: baileysLogger,
     auth: state,
-    printQRInTerminal: false,   // lo manejamos nosotros con qrcode-terminal
+    printQRInTerminal: true,
     browser: ['Agente IA', 'Chrome', '1.0.0'],
     generateHighQualityLinkPreview: false
   })
 
-  // Guardar credenciales cuando se actualicen
   sock.ev.on('creds.update', saveCreds)
 
-  // Eventos de conexión
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update
 
     if (qr) {
-      console.log('\n')
-      logger.info('📱 Escaneá este QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo:\n')
+      currentQR = qr
+      isConnected = false
+      logger.info(`📱 QR disponible — abrí la URL de Railway + /qr para escanear`)
       qrcode.generate(qr, { small: true })
-      console.log('\n')
     }
 
     if (connection === 'open') {
+      currentQR = null
+      isConnected = true
       logger.info('✅ WhatsApp conectado exitosamente')
       logger.info(`🤖 Agente activo y escuchando mensajes para ${CLIENTE_NOMBRE}`)
       startFollowupScheduler(sock)
     }
 
     if (connection === 'close') {
+      isConnected = false
       const statusCode = (lastDisconnect?.error instanceof Boom)
         ? lastDisconnect.error.output?.statusCode
         : 0
-
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut
-
       if (shouldReconnect) {
         logger.warn(`⚠️  Conexión cerrada (código ${statusCode}), reconectando en 5s...`)
         setTimeout(connectWhatsApp, 5000)
       } else {
-        logger.error('🚫 Sesión cerrada (logout). Eliminá la carpeta sessions/ y volvé a escanear el QR.')
+        logger.error('🚫 Sesión cerrada. Eliminá la carpeta sessions/ y volvé a escanear el QR.')
       }
     }
   })
 
-  // Mensajes entrantes
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return
     for (const msg of messages) {
