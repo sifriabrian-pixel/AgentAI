@@ -4,9 +4,12 @@
 import Anthropic from '@anthropic-ai/sdk'
 import fs from 'fs'
 import path from 'path'
-import { buildSystemPrompt, FOLLOWUP_MSGS } from '../prompts/fracchia.js'
+import { buildSystemPrompt, FOLLOWUP_24H, FOLLOWUP_48H } from '../prompts/villa.js'
 
-export { FOLLOWUP_MSGS }
+export const FOLLOWUP_MSGS = {
+  '24h': FOLLOWUP_24H,
+  '48h': FOLLOWUP_48H
+}
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -17,36 +20,30 @@ function loadProperties() {
     const data = JSON.parse(raw)
     return data.properties || []
   } catch {
-    console.warn('⚠️  No se encontró properties.json — el agente funcionará sin base de propiedades')
+    console.warn('⚠️  No se encontró properties.json — el agente funcionará sin base de propiedades externa')
     return []
   }
 }
 
 function parseTriggers(text) {
-  const defaults = {
-    fichaEnviada:     false,
-    linkEnviado:      false,
-    agendoConfirmado: false,
-    grupoNotificar:   false,
-    propiedadInteres: null,
-  }
-  try {
-    const match = text.match(/<triggers>([\s\S]*?)<\/triggers>/)
-    if (!match) return defaults
-    return { ...defaults, ...JSON.parse(match[1]) }
-  } catch {
-    return defaults
+  return {
+    handoff:   text.includes('[HANDOFF_TRIGGER]'),
+    qualified: text.includes('[LEAD_QUALIFIED]'),
+    followup:  text.includes('[FOLLOWUP_TRIGGER]'),
   }
 }
 
 function cleanText(text) {
-  return text.replace(/<triggers>[\s\S]*?<\/triggers>/g, '').trim()
+  return text
+    .replace(/\[HANDOFF_TRIGGER\]/g, '')
+    .replace(/\[LEAD_QUALIFIED\]/g, '')
+    .replace(/\[FOLLOWUP_TRIGGER\]/g, '')
+    .trim()
 }
 
 function getEnvVars() {
   return {
-    CALENDLY_LINK:   process.env.CALENDLY_LINK   || '[PENDIENTE — configurar CALENDLY_LINK en Railway]',
-    WHATSAPP_ASESOR: process.env.WHATSAPP_ASESOR || '[PENDIENTE — configurar WHATSAPP_ASESOR en Railway]',
+    CLIENTE_NOMBRE: process.env.CLIENTE_NOMBRE || 'Villa Bienes Raíces',
   }
 }
 
@@ -58,13 +55,13 @@ export async function askClaude(history) {
   const systemPrompt = buildSystemPrompt(cachedProperties, getEnvVars())
 
   const response = await client.messages.create({
-    model:      'claude-opus-4-5',
+    model:      'claude-sonnet-4-20250514',
     max_tokens: 1024,
     system:     systemPrompt,
     messages:   history,
   })
 
-  const rawText = response.content[0]?.text || 'Disculpá, tuve un problema técnico. Intentá de nuevo 🙏'
+  const rawText = response.content[0]?.text || 'Disculpa, tuve un problema técnico. Intenta de nuevo 🙏'
   const triggers = parseTriggers(rawText)
   const text     = cleanText(rawText)
 
