@@ -1,85 +1,98 @@
-// src/memory.js
-// Gestiona el historial de conversación por usuario y el estado del lead
+// memory.js
+// Gestión de historial de conversación y estado de cada lead
 
-const sessions = new Map()   // historial de mensajes por número
-const leadState = new Map()  // estado del lead por número
+const conversations = new Map() // jid -> [{role, content}]
+const leadStates    = new Map() // jid -> { ...estado }
 
-/**
- * Devuelve el historial de un usuario (lo crea si no existe)
- */
-export function getHistory(userId) {
-  if (!sessions.has(userId)) {
-    sessions.set(userId, [])
-  }
-  return sessions.get(userId)
+const MAX_HISTORY = 20 // mensajes máximos por conversación
+
+// ─── HISTORIAL ─────────────────────────────────────────────────────────────
+
+export function getHistory(jid) {
+  return conversations.get(jid) || []
 }
 
-/**
- * Agrega un mensaje al historial del usuario
- */
-export function addToHistory(userId, role, content) {
-  const history = getHistory(userId)
+export function addToHistory(jid, role, content) {
+  const history = conversations.get(jid) || []
   history.push({ role, content })
-
-  // Limitar a últimos 20 mensajes para no exceder tokens
-  if (history.length > 20) {
-    sessions.set(userId, history.slice(-20))
-  }
+  // Mantener solo los últimos N mensajes para no sobrecargar el contexto
+  if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY)
+  conversations.set(jid, history)
 }
 
-/**
- * Devuelve el estado del lead (calificado, handoff, followup)
- */
-export function getLeadState(userId) {
-  if (!leadState.has(userId)) {
-    leadState.set(userId, {
-      qualified: false,
-      handoffDone: false,
-      followupScheduled: false,
-      followup24Sent: false,
-      followup48Sent: false,
-      lastMessageAt: null,
-      name: null
+// ─── ESTADO DEL LEAD ───────────────────────────────────────────────────────
+
+const DEFAULT_STATE = {
+  // Timestamps
+  firstContactAt:     null,
+  lastMessageAt:      null,
+
+  // Tracking de flujo
+  fichaEnviada:       false,   // Ya recibió la ficha de la propiedad
+  linkEnviado:        false,   // Ya recibió el link de Calendly
+  agendoConfirmado:   false,   // Confirmó que agendó
+
+  // Seguimientos
+  followupScheduled:  false,
+  followup24Sent:     false,
+  followup48Sent:     false,
+
+  // Notificación interna
+  grupoNotificado:    false,
+
+  // Propiedad de interés (para la notificación al grupo)
+  propiedadInteres:   null,
+}
+
+export function getLeadState(jid) {
+  if (!leadStates.has(jid)) {
+    leadStates.set(jid, {
+      ...DEFAULT_STATE,
+      firstContactAt: Date.now()
     })
   }
-  return leadState.get(userId)
+  return leadStates.get(jid)
 }
 
-/**
- * Actualiza campos del estado del lead
- */
-export function updateLeadState(userId, updates) {
-  const current = getLeadState(userId)
-  leadState.set(userId, { ...current, ...updates })
+export function updateLeadState(jid, updates) {
+  const current = getLeadState(jid)
+  leadStates.set(jid, { ...current, ...updates })
 }
 
-/**
- * Devuelve todos los leads con seguimiento pendiente
- */
+// ─── SEGUIMIENTOS PENDIENTES ───────────────────────────────────────────────
+
 export function getLeadsPendingFollowup() {
   const now = Date.now()
   const pending = []
 
-  for (const [userId, state] of leadState.entries()) {
-    if (!state.followupScheduled || !state.lastMessageAt) continue
+  for (const [userId, state] of leadStates.entries()) {
+    // Solo leads que recibieron ficha o link pero no confirmaron agenda
+    if (!state.fichaEnviada && !state.linkEnviado) continue
+    if (state.agendoConfirmado) continue
+    if (!state.lastMessageAt) continue
 
-    const elapsed = now - state.lastMessageAt
-    const hours24 = 24 * 60 * 60 * 1000
-    const hours48 = 48 * 60 * 60 * 1000
+    const horasSinRespuesta = (now - state.lastMessageAt) / (1000 * 60 * 60)
 
-    if (!state.followup24Sent && elapsed >= hours24) {
+    // Seguimiento 24h: para quienes recibieron la ficha y no respondieron
+    if (
+      state.fichaEnviada &&
+      !state.linkEnviado &&
+      !state.followup24Sent &&
+      horasSinRespuesta >= 24
+    ) {
       pending.push({ userId, type: '24h' })
-    } else if (state.followup24Sent && !state.followup48Sent && elapsed >= hours48) {
+    }
+
+    // Seguimiento 48h: para quienes recibieron el link y no confirmaron
+    if (
+      state.linkEnviado &&
+      !state.agendoConfirmado &&
+      !state.followup48Sent &&
+      horasSinRespuesta >= 48
+    ) {
       pending.push({ userId, type: '48h' })
     }
   }
 
   return pending
-}
-
-/**
- * Lista todos los leads (para logging)
- */
-export function getAllLeads() {
-  return Array.from(leadState.entries()).map(([id, state]) => ({ id, ...state }))
 }
